@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/loft-sh/devpod-provider-kubernetes/pkg/throttledlogger"
@@ -21,8 +22,9 @@ func (k *KubernetesDriver) waitPodRunning(ctx context.Context, id string) (*core
 		return nil, perrors.Wrap(err, "parse pod timeout")
 	}
 
+	started := time.Now()
 	var pod *corev1.Pod
-	err = wait.PollImmediate(time.Second, timeoutDuration, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(ctx, time.Second, timeoutDuration, true, func(ctx context.Context) (bool, error) {
 		var err error
 		pod, err = k.getPod(ctx, id)
 		if err != nil {
@@ -37,9 +39,29 @@ func (k *KubernetesDriver) waitPodRunning(ctx context.Context, id string) (*core
 			return false, nil
 		}
 
+		// Let's print all conditions that are false to help people troubleshoot infra issues
+		condMsg := ""
+		if time.Since(started) > 45*time.Second { // start printing conditions after a delay
+			for _, cond := range pod.Status.Conditions {
+				if cond.Status == corev1.ConditionFalse {
+					condMsg += fmt.Sprintf("Condition \"%s\" is %s\n", cond.Type, cond.Status)
+					if cond.Reason != "" {
+						condMsg += fmt.Sprintf("%s Reason: %s\n", cond.Type, cond.Reason)
+					}
+					if cond.Message != "" {
+						condMsg += fmt.Sprintf("%s Message: %s\n", cond.Type, cond.Message)
+					}
+				}
+			}
+		}
+
 		// check pod status
 		if len(pod.Status.ContainerStatuses) < len(pod.Spec.Containers) {
-			throttledLogger.Infof("Waiting, since pod '%s' is starting", id)
+			msg := fmt.Sprintf("Waiting, since pod '%s' is starting", id)
+			if condMsg != "" {
+				msg += fmt.Sprintf("\n%s", strings.TrimSpace(condMsg))
+			}
+			throttledLogger.Infof("%s", msg)
 			return false, nil
 		}
 
